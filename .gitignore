@@ -2,3 +2,6 @@ node_modules/
 client/build/
 .env
 *.log
+server/push-subscriptions.json
+server/alert-cooldowns.json
+*.bak-*
