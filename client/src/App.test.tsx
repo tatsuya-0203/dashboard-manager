@@ -29,6 +29,7 @@ beforeEach(() => {
       '/auth/me': { user: { email: 'owner@example.test', name: 'Owner' } },
       '/api/apps': processes, '/api/scan': [], '/api/info': system,
       '/api/docker': [], '/api/ssh/logins': [], '/api/vscode/status': { running: false, processCount: 0 },
+      '/api/security': { generatedAt: new Date().toISOString(), ssh: null, ufw: null, fail2ban: null, defenses: [] },
     };
     return { ok: status === 200, status, json: async () => data[url] ?? {} } as Response;
   });

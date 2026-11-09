@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import './App.css';
+import SecurityPanel from './SecurityPanel';
 
 interface AppProcess {
   id: number;
@@ -487,6 +488,8 @@ function App() {
           <button key={value} className={`summary-item ${value}`} aria-pressed={statusFilter === value} onClick={() => setStatusFilter(String(value))}><span>{label}</span><strong>{lastUpdated ? count : '—'}</strong></button>
         ))}
       </section>
+
+      <SecurityPanel request={request} autoRefresh={autoRefresh} />
 
       {serverInfo && (
         <section className="sys-info-section">

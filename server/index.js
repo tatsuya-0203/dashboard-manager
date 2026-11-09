@@ -751,7 +751,7 @@ const summarizeSSH = (text, nowSec) => {
     windows: Object.fromEntries(Object.entries(counts).map(([k, v]) => [k, { failed: v.failed, uniqueIps: v.ips.size, accepted: v.accepted }])),
     topIps24h: countTop(ips).map(([ip, count]) => ({ ip, count })),
     topUsers24h: countTop(users).map(([user, count]) => ({ user, count })),
-    accepted24h: accepted.slice(-20).reverse(),
+    accepted24h: accepted.slice(-100).reverse(),
   };
 };
 const summarizeUFW = (text) => {
