@@ -248,5 +248,17 @@ const key = () => evaluate('generateKillToken()');
   journal.emit('close', 0); timers.filter(t => t.ms === 5000).at(-1).fn();
   assert(children.at(-1).args.includes('--after-cursor=cursor-21'));
   assert(evaluate("isLocalIP('::ffff:192.168.1.1') && isLocalIP('fd00::1') && !isLocalIP('8.8.8.8')"));
-  console.log('All server / SW checks passed: auth, CSRF, routes, PM2, SSE, atomic storage, token kill flow and SSH replay. External effects are stubbed.');
+  // Attack summary parsing.
+  const sshText = ['99000 h sshd[1]: Invalid user admin from 1.2.3.4 port 5', '99001 h sshd[1]: Invalid user  from 1.2.3.4 port 5',
+    '99002 h sshd[2]: Connection closed by authenticating user root 5.6.7.8 port 9 [preauth]', '99003 h sshd[3]: Accepted publickey for me from 2405::1 port 1 ssh2',
+    '1 h sshd[4]: Invalid user old from 9.9.9.9 port 1', 'junk'].join('\n');
+  const ssh = JSON.parse(evaluate(`JSON.stringify(summarizeSSH(${JSON.stringify(sshText)}, 100000))`));
+  assert.deepEqual(ssh.windows['1h'], { failed: 3, uniqueIps: 2, accepted: 1 });
+  assert.equal(ssh.windows['7d'].failed, 4);
+  assert.deepEqual(ssh.topIps24h[0], { ip: '1.2.3.4', count: 2 });
+  assert.deepEqual(ssh.topUsers24h.map(u => u.user).sort(), ['(空)', 'admin', 'root']);
+  assert.equal(ssh.accepted24h[0].user, 'me');
+  const ufw = JSON.parse(evaluate(`JSON.stringify(summarizeUFW("[UFW BLOCK] SRC=8.8.8.8 DST=x PROTO=TCP SPT=1 DPT=443\\n[UFW BLOCK] SRC=192.168.1.2 PROTO=UDP DPT=21027\\n[UFW BLOCK] SRC=fe80::1 PROTO=UDP DPT=21027"))`));
+  assert.deepEqual(ufw, { blocked24h: 1, topPorts: [{ port: '443/TCP', count: 1 }], topSources: [{ ip: '8.8.8.8', count: 1 }] });
+  console.log('All server / SW checks passed: auth, CSRF, routes, PM2, SSE, atomic storage, token kill flow, SSH replay and attack summary. External effects are stubbed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

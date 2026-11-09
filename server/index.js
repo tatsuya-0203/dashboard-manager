@@ -725,6 +725,93 @@ app.post('/api/vscode/kill', async (req, res) => {
   } finally { vscodeKilling = false; }
 });
 
+// --- 攻撃状況 (SSH総当たり / ufw / fail2ban) ---
+const countTop = (items, n = 10) => [...items.reduce((m, k) => m.set(k, (m.get(k) || 0) + 1), new Map())].sort((a, b) => b[1] - a[1]).slice(0, n);
+// journalctl -o short-unix lines: "<unix.frac> <host> sshd[pid]: <message>"
+const summarizeSSH = (text, nowSec) => {
+  const windows = { '1h': 3600, '24h': 86400, '7d': 604800 };
+  const counts = Object.fromEntries(Object.keys(windows).map(k => [k, { failed: 0, ips: new Set(), accepted: 0 }]));
+  const ips = [], users = [], accepted = [];
+  for (const line of text.split('\n')) {
+    const m = line.match(/^(\d+)(?:\.\d+)? \S+ sshd\[\d+\]: (.*)$/);
+    if (!m) continue;
+    const age = nowSec - Number(m[1]), msg = m[2];
+    const fail = msg.match(/^(?:Invalid user (\S*) from|Failed \S+ for (?:invalid user )?(\S+) from|Connection closed by authenticating user (\S+)|Disconnected from authenticating user (\S+)) ([0-9a-fA-F.:]+) port/);
+    const ok = msg.match(/^Accepted (\S+) for (\S+) from ([0-9a-fA-F.:]+) port/);
+    if (!fail && !ok) continue;
+    for (const [k, sec] of Object.entries(windows)) {
+      if (age > sec) continue;
+      if (fail) { counts[k].failed++; counts[k].ips.add(fail[5]); } else counts[k].accepted++;
+    }
+    if (age > windows['24h']) continue;
+    if (fail) { ips.push(fail[5]); users.push((fail[1] ?? fail[2] ?? fail[3] ?? fail[4]) || '(空)'); }
+    else accepted.push({ time: new Date(Number(m[1]) * 1000).toISOString(), method: ok[1], user: ok[2], ip: ok[3] });
+  }
+  return {
+    windows: Object.fromEntries(Object.entries(counts).map(([k, v]) => [k, { failed: v.failed, uniqueIps: v.ips.size, accepted: v.accepted }])),
+    topIps24h: countTop(ips).map(([ip, count]) => ({ ip, count })),
+    topUsers24h: countTop(users).map(([user, count]) => ({ user, count })),
+    accepted24h: accepted.slice(-20).reverse(),
+  };
+};
+const summarizeUFW = (text) => {
+  const hits = [];
+  for (const line of text.split('\n')) {
+    const src = line.match(/ SRC=(\S+)/)?.[1], port = line.match(/ DPT=(\d+)/)?.[1], proto = line.match(/ PROTO=(\S+)/)?.[1];
+    if (src && !isLocalIP(src) && !/^(fe80|ff0)/i.test(src)) hits.push({ src, port: port ? `${port}/${proto}` : proto || '?' });
+  }
+  return { blocked24h: hits.length, topPorts: countTop(hits.map(h => h.port), 8).map(([port, count]) => ({ port, count })), topSources: countTop(hits.map(h => h.src), 8).map(([ip, count]) => ({ ip, count })) };
+};
+const geoCache = new Map();
+const cachedGeo = async ip => {
+  if (!geoCache.has(ip)) { if (geoCache.size > 2000) geoCache.clear(); geoCache.set(ip, await geolocateIP(ip)); }
+  return geoCache.get(ip);
+};
+const run = (file, args) => runFile(file, args, { encoding: 'utf8', timeout: 15000, maxBuffer: 64 * 1024 * 1024 }).then(r => r.stdout, e => (e.code === 1 && typeof e.stdout === 'string' ? e.stdout : null));
+let securityCache = null, securityCacheAt = 0, securityPending = null;
+// ponytail: 5-minute cache; journal scans of 7 days of sshd lines take ~1s. Move to an incremental cursor if logs grow 10x.
+const getSecuritySummary = async () => {
+  if (securityCache && Date.now() - securityCacheAt < 5 * 60 * 1000) return securityCache;
+  if (securityPending) return securityPending;
+  securityPending = (async () => {
+    const [sshLog, ufwLog, f2b, sshd, mitigation, f2bActive] = await Promise.all([
+      run('sudo', ['-n', 'journalctl', '-u', 'ssh', '--since', '7 days ago', '-o', 'short-unix', '--no-pager', '--grep', 'Invalid user|Failed |authenticating user|^Accepted ']),
+      run('sudo', ['-n', 'journalctl', '-k', '--since', '24 hours ago', '-o', 'cat', '--no-pager', '--grep', 'UFW BLOCK']),
+      run('sudo', ['-n', 'fail2ban-client', 'status', 'sshd']),
+      run('sudo', ['-n', 'sshd', '-T']),
+      run('systemctl', ['is-active', 'cve-2026-98432-mitigation']),
+      run('systemctl', ['is-active', 'fail2ban']),
+    ]);
+    const ssh = sshLog === null ? null : summarizeSSH(sshLog, Date.now() / 1000);
+    if (ssh) await Promise.all(ssh.topIps24h.map(async entry => Object.assign(entry, await cachedGeo(entry.ip))));
+    const sshdOpt = key => sshd?.match(new RegExp(`^${key} (\\S+)$`, 'm'))?.[1] || null;
+    const f2bNum = label => Number(f2b?.match(new RegExp(`${label}:\\s*(\\d+)`))?.[1] ?? NaN);
+    const result = {
+      generatedAt: new Date().toISOString(),
+      ssh,
+      ufw: ufwLog === null ? null : summarizeUFW(ufwLog),
+      fail2ban: f2b === null ? null : { active: f2bActive?.trim() === 'active', currentlyBanned: f2bNum('Currently banned'), totalBanned: f2bNum('Total banned'), currentlyFailed: f2bNum('Currently failed') },
+      defenses: [
+        { name: 'SSHパスワードログイン無効', ok: sshdOpt('passwordauthentication') === 'no', detail: '鍵がないとログインできないため総当たりは成功しない' },
+        { name: 'rootログイン', ok: sshdOpt('permitrootlogin') === 'no', detail: `PermitRootLogin ${sshdOpt('permitrootlogin') || '不明'}` },
+        { name: 'fail2ban (SSH)', ok: f2bActive?.trim() === 'active', detail: '失敗を繰り返すIPを一時的に遮断' },
+        { name: 'ファイアウォール (ufw)', ok: ufwLog !== null, detail: '許可したポート以外の受信を遮断' },
+        { name: 'CVE-2026-98432 応急処置', ok: mitigation?.trim() === 'active', detail: 'IPオプション付きIPv4 SYNを破棄 (修正版カーネル待ち)' },
+        { name: '再起動待ちの更新なし', ok: !fs.existsSync('/var/run/reboot-required'), detail: fs.existsSync('/var/run/reboot-required') ? '再起動で更新(カーネル等)が有効になる' : '最新の更新が有効' },
+      ],
+    };
+    securityCache = result; securityCacheAt = Date.now();
+    return result;
+  })().finally(() => { securityPending = null; });
+  return securityPending;
+};
+app.get('/api/security', requireAuth, async (req, res) => res.json(await getSecuritySummary()));
+// 毎朝の攻撃サマリー通知
+cron.schedule('3 8 * * *', () => getSecuritySummary().then(s => {
+  const d = s.ssh?.windows['24h'];
+  if (d) return sendPushToAll('攻撃サマリー(24時間)', `SSH失敗 ${d.failed}回 / ${d.uniqueIps}IP・成功 ${d.accepted}回・ufw遮断 ${s.ufw?.blocked24h ?? '?'}件・fail2ban ${s.fail2ban?.totalBanned ?? '?'}件BAN累計`);
+}).catch(() => {}));
+
 // --- Push notification endpoints ---
 app.get('/api/push/vapid-public-key', requireAuth, (req, res) => {
   res.json({ key: process.env.VAPID_PUBLIC_KEY });
