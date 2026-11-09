@@ -15,6 +15,8 @@ beforeEach(() => {
   apiStatus = 200; actionStatus = 500;
   streams.length = 0;
   localStorage.clear();
+  Element.prototype.scrollIntoView = jest.fn();
+  Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: jest.fn().mockReturnValue({ matches: false }) });
   Object.defineProperty(window, 'EventSource', { writable: true, value: jest.fn().mockImplementation((url: string) => {
     const listeners: Record<string, (event: MessageEvent) => void> = {};
     const stream = { url, listeners, addEventListener: jest.fn((name: string, listener: (event: MessageEvent) => void) => { listeners[name] = listener; }), close: jest.fn() };
@@ -96,8 +98,10 @@ test('pins persist, search shortcut works, and pausing polling keeps an open log
   fireEvent.click(screen.getByRole('button', { name: 'beta をお気に入りに追加' }));
   expect(within(screen.getAllByRole('article')[0]).getByRole('heading')).toHaveTextContent('beta');
   expect(localStorage.getItem('dashboard-pins')).toContain('beta');
+  fireEvent.click(screen.getByRole('button', { name: '管理アプリ' }));
   fireEvent.keyDown(window, { key: '/' });
   expect(screen.getByRole('searchbox')).toHaveFocus();
+  expect(screen.getByRole('button', { name: '管理アプリ' })).toHaveAttribute('aria-expanded', 'true');
   fireEvent.click(screen.getByRole('button', { name: 'alpha の詳細とログ' }));
   fireEvent.click(screen.getByRole('checkbox', { name: '定期更新' }));
   const calls = (global.fetch as jest.Mock).mock.calls.length;
@@ -202,4 +206,133 @@ test('logout aborts manual refresh and ignores responses arriving after the sess
   await act(async () => { resolveApps(jsonResponse(processes)); });
   expect(screen.queryAllByRole('article')).toHaveLength(0);
   expect(streams[0].close).toHaveBeenCalled();
+});
+
+const sections = ['アプリの状態集計', 'セキュリティ', 'サーバー情報', '管理アプリ', 'Dockerコンテナ', 'SSH / VS Code Remote', '検出されたプロジェクト'];
+
+test('section menu toggles, closes on Escape or outside click, and returns focus', async () => {
+  render(<App />);
+  await screen.findByRole('button', { name: 'alpha の詳細とログ' });
+  const button = screen.getByRole('button', { name: 'セクションメニュー' });
+  expect(button).toHaveAttribute('aria-expanded', 'false');
+  expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+  fireEvent.click(button);
+  const menu = screen.getByRole('navigation', { name: 'セクション一覧' });
+  expect(button).toHaveAttribute('aria-controls', menu.id);
+  expect(button).toHaveAttribute('aria-expanded', 'true');
+  expect(within(menu).getAllByRole('button').map(item => item.textContent)).toEqual(sections);
+  expect(within(menu).getAllByRole('button')[0]).toHaveFocus();
+  fireEvent.click(button);
+  expect(menu).not.toBeVisible();
+  expect(button).toHaveFocus();
+  fireEvent.click(button);
+  fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+  expect(button).toHaveAttribute('aria-expanded', 'false');
+  expect(menu).not.toBeVisible();
+  expect(button).toHaveFocus();
+  fireEvent.click(button);
+  fireEvent.click(screen.getByRole('heading', { level: 1 }));
+  expect(menu).not.toBeVisible();
+  expect(button).toHaveFocus();
+});
+
+test('menu only lists rendered sections and updates when server info becomes available', async () => {
+  const original = global.fetch;
+  let missing = true;
+  global.fetch = jest.fn((input, options) => String(input) === '/api/info' && missing
+    ? Promise.resolve(jsonResponse({}, 500)) : original(input, options));
+  render(<App />);
+  await screen.findByRole('button', { name: 'alpha の詳細とログ' });
+  fireEvent.click(screen.getByRole('button', { name: 'セクションメニュー' }));
+  const menu = screen.getByRole('navigation');
+  expect(within(menu).queryByRole('button', { name: 'サーバー情報' })).not.toBeInTheDocument();
+  expect(within(menu).getAllByRole('button')).toHaveLength(6);
+  fireEvent.keyDown(menu, { key: 'Escape' });
+  missing = false;
+  fireEvent.click(screen.getByRole('button', { name: '更新' }));
+  await screen.findByRole('heading', { name: /サーバー情報/ });
+  fireEvent.click(screen.getByRole('button', { name: 'セクションメニュー' }));
+  expect(within(menu).getAllByRole('button')).toHaveLength(7);
+});
+
+test.each([false, true])('navigation expands, scrolls and focuses every section (reduced motion: %s)', async reduced => {
+  (window.matchMedia as jest.Mock).mockReturnValue({ matches: reduced });
+  render(<App />);
+  await screen.findByRole('button', { name: 'alpha の詳細とログ' });
+  const scroll = Element.prototype.scrollIntoView as jest.Mock;
+  for (const name of sections) {
+    const toggle = screen.getByRole('button', { name });
+    const body = document.getElementById(toggle.getAttribute('aria-controls')!)!;
+    fireEvent.click(toggle);
+    expect(body).not.toBeVisible();
+    scroll.mockImplementation(function (this: HTMLElement) {
+      expect(body).toBeVisible();
+      expect(this).toBe(toggle.closest('h2'));
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'セクションメニュー' }));
+    fireEvent.click(within(screen.getByRole('navigation')).getByRole('button', { name }));
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(toggle.closest('h2')).toHaveFocus();
+    expect(scroll).toHaveBeenLastCalledWith({ behavior: reduced ? 'auto' : 'smooth', block: 'start' });
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('dashboard-collapsed-sections')!)).toEqual([]);
+  }
+  expect(window.matchMedia).toHaveBeenCalledWith('(prefers-reduced-motion: reduce)');
+});
+
+test('each section toggles aria-expanded and restores its saved collapsed state after remount', async () => {
+  const { unmount } = render(<App />);
+  await screen.findByRole('button', { name: 'alpha の詳細とログ' });
+  for (const name of sections) {
+    const toggle = screen.getByRole('button', { name });
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(document.getElementById(toggle.getAttribute('aria-controls')!)).not.toBeVisible();
+  }
+  expect(JSON.parse(localStorage.getItem('dashboard-collapsed-sections')!)).toHaveLength(7);
+  unmount();
+  render(<App />);
+  await screen.findByRole('button', { name: 'サーバー情報' });
+  for (const name of sections) {
+    const toggle = screen.getByRole('button', { name });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(document.getElementById(toggle.getAttribute('aria-controls')!)).toBeVisible();
+  }
+  expect(JSON.parse(localStorage.getItem('dashboard-collapsed-sections')!)).toEqual([]);
+});
+
+test.each(['unavailable', 'invalid-json', 'invalid-shape'])('collapse works with %s storage', async mode => {
+  if (mode === 'unavailable') {
+    jest.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('Storage disabled'); });
+    jest.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Storage disabled'); });
+  } else localStorage.setItem('dashboard-collapsed-sections', mode === 'invalid-json' ? '{' : 'null');
+  render(<App />);
+  const toggle = await screen.findByRole('button', { name: 'サーバー情報' });
+  expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  fireEvent.click(toggle);
+  expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  fireEvent.click(toggle);
+  expect(toggle).toHaveAttribute('aria-expanded', 'true');
+});
+
+test('collapsed sections keep polling and reveal updated data when expanded', async () => {
+  jest.useFakeTimers();
+  render(<App />);
+  await screen.findByRole('button', { name: 'alpha の詳細とログ' });
+  for (const name of sections) fireEvent.click(screen.getByRole('button', { name }));
+  const original = global.fetch;
+  global.fetch = jest.fn((input, options) => String(input) === '/api/apps'
+    ? Promise.resolve(jsonResponse([{ ...processes[0], name: 'updated' }])) : original(input, options));
+  await act(async () => { jest.advanceTimersByTime(10000); });
+  for (const url of ['/api/apps', '/api/info', '/api/scan', '/api/docker', '/api/ssh/logins', '/api/vscode/status']) {
+    expect(global.fetch).toHaveBeenCalledWith(url, expect.anything());
+  }
+  await act(async () => { jest.advanceTimersByTime(290000); });
+  expect(global.fetch).toHaveBeenCalledWith('/api/security', expect.anything());
+  expect(screen.queryByRole('article')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: '管理アプリ' }));
+  expect(screen.getByRole('button', { name: 'updated の詳細とログ' })).toBeVisible();
 });
