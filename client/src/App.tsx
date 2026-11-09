@@ -43,6 +43,18 @@ interface ServerInfo {
   os: { platform: string; uptime: number; loadavg: number[] };
 }
 
+const sectionNames = {
+  summary: 'アプリの状態集計',
+  security: 'セキュリティ',
+  'sys-info': 'サーバー情報',
+  apps: '管理アプリ',
+  docker: 'Dockerコンテナ',
+  ssh: 'SSH / VS Code Remote',
+  projects: '検出されたプロジェクト',
+};
+type SectionId = keyof typeof sectionNames;
+const sectionIds = Object.keys(sectionNames) as SectionId[];
+
 function App() {
   const [user, setUser] = useState<{ email: string; name: string } | null | undefined>(undefined);
   const [apps, setApps] = useState<AppProcess[]>([]);
@@ -63,6 +75,16 @@ function App() {
   const [filter, setFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [sort, setSort] = useState('name');
+  const [collapsed, setCollapsed] = useState<SectionId[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('dashboard-collapsed-sections') || '[]');
+      return Array.isArray(saved) ? sectionIds.filter(id => saved.includes(id)) : [];
+    } catch { return []; }
+  });
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [navigationTarget, setNavigationTarget] = useState<SectionId | 'search' | null>(null);
+  const navigationRef = useRef<HTMLDivElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
   const [theme, setTheme] = useState(() => {
     try { const saved = localStorage.getItem('dashboard-theme'); return saved && ['system', 'light', 'dark'].includes(saved) ? saved : 'system'; } catch { return 'system'; }
   });
@@ -111,9 +133,41 @@ function App() {
     try { localStorage.setItem('dashboard-pins', JSON.stringify(pins)); } catch { /* Keep in-memory pins usable. */ }
   }, [pins]);
   useEffect(() => {
+    try { localStorage.setItem('dashboard-collapsed-sections', JSON.stringify(collapsed)); } catch { /* Keep toggles usable without storage. */ }
+  }, [collapsed]);
+  const closeMenu = useCallback(() => {
+    setMenuOpen(false);
+    menuButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+  useEffect(() => {
+    if (!menuOpen) return;
+    navigationRef.current?.querySelector<HTMLButtonElement>('nav button')?.focus();
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); closeMenu(); }
+    };
+    const outside = (event: MouseEvent) => {
+      if (event.target instanceof Node && !navigationRef.current?.contains(event.target)) closeMenu();
+    };
+    document.addEventListener('keydown', escape);
+    document.addEventListener('click', outside);
+    return () => { document.removeEventListener('keydown', escape); document.removeEventListener('click', outside); };
+  }, [menuOpen, closeMenu]);
+  useEffect(() => {
+    if (!navigationTarget) return;
+    const target = navigationTarget === 'search' ? searchRef.current : document.getElementById(`${navigationTarget}-title`);
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView({ behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+    setNavigationTarget(null);
+  }, [navigationTarget]);
+  useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey || selectedAppRef.current || (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable]'))) return;
-      if (searchRef.current) { event.preventDefault(); searchRef.current.focus(); }
+      if (searchRef.current) {
+        event.preventDefault();
+        setMenuOpen(false);
+        setCollapsed(previous => previous.filter(id => id !== 'apps'));
+        setNavigationTarget('search');
+      }
     };
     window.addEventListener('keydown', shortcut);
     return () => window.removeEventListener('keydown', shortcut);
@@ -128,7 +182,7 @@ function App() {
     epochRef.current++;
     userRef.current = null;
     requestsRef.current.forEach(controller => controller.abort());
-    setUser(null); handleCloseModal();
+    setUser(null); setMenuOpen(false); setNavigationTarget(null); handleCloseModal();
     setApps([]); setPotentialApps([]); setServerInfo(null); setSSHLogins([]); setDockerContainers([]); setVscodeStatus(null);
     setError(message); setNotice('');
   }, [handleCloseModal]);
@@ -431,6 +485,14 @@ function App() {
     (statusFilter === 'all' || (statusFilter === 'other' ? !['online', 'stopped', 'errored'].includes(a.status) : a.status === statusFilter)))
     .sort((a, b) => Number(pins.includes(pinKey(b))) - Number(pins.includes(pinKey(a))) || (sort === 'cpu' ? b.cpu - a.cpu : sort === 'memory' ? b.memory - a.memory : sort === 'restarts' ? b.restarts - a.restarts : 0) || a.name.localeCompare(b.name, 'ja', { numeric: true }) || a.id - b.id);
   const themeControl = <label className="theme-control">表示<select aria-label="表示テーマ" value={theme} onChange={e => setTheme(e.target.value)}><option value="system">端末に合わせる</option><option value="light">ライト</option><option value="dark">ダーク</option></select></label>;
+  const sectionHeading = (id: SectionId, count?: React.ReactNode) => (
+    <h2 id={`${id}-title`} className="section-title" tabIndex={-1}>
+      <button className="section-toggle" aria-expanded={!collapsed.includes(id)} aria-controls={`${id}-body`}
+        onClick={() => setCollapsed(previous => previous.includes(id) ? previous.filter(value => value !== id) : [...previous, id])}>
+        <span className="section-chevron" aria-hidden="true">{collapsed.includes(id) ? '›' : '⌄'}</span>{sectionNames[id]}
+      </button>{count != null && <span className="count">{count}</span>}
+    </h2>
+  );
 
   if (user === undefined) return <div className="loading" role="status">読み込み中…</div>;
 
@@ -456,6 +518,19 @@ function App() {
   return (
     <main className="container">
       <header>
+        <div className="section-navigation" ref={navigationRef}>
+          <button ref={menuButtonRef} className="menu-toggle" aria-label="セクションメニュー" aria-expanded={menuOpen} aria-controls="section-menu"
+            onClick={() => menuOpen ? closeMenu() : setMenuOpen(true)}><span aria-hidden="true">☰</span></button>
+          <nav id="section-menu" className="section-menu" aria-label="セクション一覧" hidden={!menuOpen}>
+            {sectionIds.filter(id => id !== 'sys-info' || serverInfo).map(id => (
+              <button key={id} onClick={() => {
+                setCollapsed(previous => previous.filter(value => value !== id));
+                setMenuOpen(false);
+                setNavigationTarget(id);
+              }}>{sectionNames[id]}</button>
+            ))}
+          </nav>
+        </div>
         <div className="header-left">
           <p className="eyebrow">SERVER OVERVIEW</p>
           <h1>アプリ管理ダッシュボード</h1>
@@ -483,17 +558,21 @@ function App() {
       {dataError && <div className="feedback error" role="alert">{dataError}。取得できた項目のみ更新しています。 <button disabled={refreshing} onClick={() => fetchData()}>再試行</button></div>}
       {!selectedApp && error && <div className="feedback error" role="alert">{error}</div>}
       {!selectedApp && (pending || notice) && <div className="feedback" role="status">{pending ? `${pending}中…` : notice}</div>}
-      <section className="summary-grid" aria-label="アプリの状態集計">
+      <section id="summary" aria-labelledby="summary-title">
+        {sectionHeading('summary')}
+        <div id="summary-body" className="summary-grid" hidden={collapsed.includes('summary')}>
         {[['all', 'すべて', apps.length], ['online', '稼働中', apps.filter(a => a.status === 'online').length], ['stopped', '停止', apps.filter(a => a.status === 'stopped').length], ['errored', 'エラー', apps.filter(a => a.status === 'errored').length]].map(([value, label, count]) => (
           <button key={value} className={`summary-item ${value}`} aria-pressed={statusFilter === value} onClick={() => setStatusFilter(String(value))}><span>{label}</span><strong>{lastUpdated ? count : '—'}</strong></button>
         ))}
+        </div>
       </section>
 
-      <SecurityPanel request={request} autoRefresh={autoRefresh} />
+      <SecurityPanel request={request} autoRefresh={autoRefresh} heading={sectionHeading('security')} collapsed={collapsed.includes('security')} />
 
       {serverInfo && (
-        <section className="sys-info-section">
-          <div className="info-grid">
+        <section id="sys-info" className="sys-info-section" aria-labelledby="sys-info-title">
+          {sectionHeading('sys-info')}
+          <div id="sys-info-body" className="info-grid" hidden={collapsed.includes('sys-info')}>
             <div className="info-card">
               <h4>システムメモリ</h4>
               <div className="bar-container">
@@ -542,9 +621,10 @@ function App() {
         </section>
       )}
 
-      <section>
+      <section id="apps" aria-labelledby="apps-title">
+        {sectionHeading('apps', `${filteredApps.length} / ${apps.length}`)}
+        <div id="apps-body" hidden={collapsed.includes('apps')}>
         <div className="section-header">
-          <h2>管理アプリ <span className="count">{filteredApps.length} / {apps.length}</span></h2>
           <div className="filters">
             <label>検索<input ref={searchRef} className="search-input" type="search" placeholder="名前・パス・ポート（/ キー）" value={filter} onChange={e => setFilter(e.target.value)} /></label>
             <label>状態<select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}><option value="all">すべて</option><option value="online">稼働中</option><option value="stopped">停止</option><option value="errored">エラー</option><option value="other">その他</option></select></label>
@@ -581,11 +661,13 @@ function App() {
             </article>
           ))}
         </div>
+        </div>
       </section>
 
       {(
-        <section className="scan-section">
-          <h2>Dockerコンテナ <span className="count">{dockerContainers.length}</span></h2>
+        <section id="docker" className="scan-section" aria-labelledby="docker-title">
+          {sectionHeading('docker', dockerContainers.length)}
+          <div id="docker-body" hidden={collapsed.includes('docker')}>
           {extraStatus.docker && <p role="status">{extraStatus.docker}</p>}
           {!extraStatus.docker && dockerContainers.length === 0 && <p className="empty-state">稼働中のコンテナはありません。</p>}
           <div className="table-scroll" role="region" aria-label="一覧表（横スクロール可能）" tabIndex={0}><table className="scan-table">
@@ -603,6 +685,7 @@ function App() {
               ))}
             </tbody>
           </table></div>
+          </div>
         </section>
       )}
 
@@ -653,9 +736,10 @@ function App() {
         </dialog>
       )}
 
-      <section className="scan-section">
+      <section id="ssh" className="scan-section" aria-labelledby="ssh-title">
+        {sectionHeading('ssh')}
+        <div id="ssh-body" hidden={collapsed.includes('ssh')}>
         <div className="section-header" style={{ marginBottom: 12 }}>
-          <h2>SSH / VS Code Remote</h2>
           {vscodeStatus && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               {vscodeStatus.running ? (
@@ -711,10 +795,12 @@ function App() {
             </tbody>
           </table></div>
         )}
+        </div>
       </section>
 
-      <section className="scan-section">
-        <h2>検出されたプロジェクト <span className="count">{potentialApps.length}</span></h2>
+      <section id="projects" className="scan-section" aria-labelledby="projects-title">
+        {sectionHeading('projects', potentialApps.length)}
+        <div id="projects-body" hidden={collapsed.includes('projects')}>
         {!loading && !dataError && potentialApps.length === 0 && <p className="empty-state">ホームディレクトリにプロジェクトが見つかりませんでした。</p>}
         <div className="table-scroll" role="region" aria-label="一覧表（横スクロール可能）" tabIndex={0}><table className="scan-table">
           <thead><tr><th>プロジェクト名</th><th>バージョン</th><th>パス</th><th>操作</th></tr></thead>
@@ -732,6 +818,7 @@ function App() {
             })}
           </tbody>
         </table></div>
+        </div>
       </section>
     </main>
   );

@@ -34,6 +34,7 @@ test('renders full security data with counts, origins, defenses and verifiable s
   expect(screen.getByLabelText('SSHパスワードログイン無効：正常')).toHaveTextContent('OK');
   expect(screen.getByText('鍵による認証のみ許可')).toBeInTheDocument();
   const logins = within(screen.getByRole('region', { name: '最近の成功ログイン' }));
+  expect(logins.getByText(/過去24時間・最新100件/)).toBeInTheDocument();
   expect(logins.getByText('owner')).toBeInTheDocument();
   expect(logins.getByText('192.168.1.5')).toBeInTheDocument();
   expect(logins.getByText(/publickey/)).toBeInTheDocument();

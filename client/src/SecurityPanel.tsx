@@ -17,9 +17,11 @@ const unavailable = '取得できませんでした';
 const windows = ['1h', '24h', '7d'] as const;
 const count = (value: number | null | undefined) => value == null ? unavailable : value.toLocaleString('ja-JP');
 
-export default function SecurityPanel({ request, autoRefresh }: {
+export default function SecurityPanel({ request, autoRefresh, heading, collapsed = false }: {
   request: (url: string, options?: RequestInit) => Promise<any>;
   autoRefresh: boolean;
+  heading?: React.ReactNode;
+  collapsed?: boolean;
 }) {
   const [data, setData] = useState<SecuritySummary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -93,9 +95,10 @@ export default function SecurityPanel({ request, autoRefresh }: {
   const maxAttacks = Math.max(1, ...(ssh?.topIps24h.map(entry => entry.count) ?? []));
 
   return (
-    <section className="security-panel" aria-labelledby="security-title">
+    <section id="security" className="security-panel" aria-labelledby="security-title">
+      {heading || <h2 id="security-title">セキュリティ</h2>}
+      <div id="security-body" hidden={collapsed}>
       <div className="section-header">
-        <h2 id="security-title">セキュリティ</h2>
         <button onClick={refresh} disabled={loading} aria-label="セキュリティを更新">{loading ? '更新中…' : 'セキュリティを更新'}</button>
       </div>
       <div className={`security-verdict ${problems.length ? 'warning' : 'ok'}`} role="status">
@@ -131,12 +134,13 @@ export default function SecurityPanel({ request, autoRefresh }: {
           </li>)}</ul>}
         </section>
         <section className="info-card" aria-labelledby="security-logins">
-          <h3 id="security-logins">最近の成功ログイン</h3><p>過去24時間・最新20件。すべて自分のログインか確認してください。</p>
+          <h3 id="security-logins">最近の成功ログイン</h3><p>過去24時間・最新100件。すべて自分のログインか確認してください。</p>
           {!ssh ? <p>{unavailable}</p> : !ssh.accepted24h.length ? <p>成功ログインの記録はありません。</p> : <ul className="security-list">{ssh.accepted24h.map((login, index) => <li key={`${login.time}-${index}`}>
             <div className="security-row"><strong>{login.user}</strong><time dateTime={login.time}>{new Date(login.time).toLocaleString('ja-JP')}</time></div>
             <p>接続元：<code>{login.ip}</code> · 認証方式：{login.method}</p>
           </li>)}</ul>}
         </section>
+      </div>
       </div>
     </section>
   );
