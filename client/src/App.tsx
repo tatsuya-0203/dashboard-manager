@@ -38,6 +38,7 @@ interface SSHLogin {
 interface ServerInfo {
   network: { localIps: string[]; globalIp: string };
   memory: { total: number; free: number; used: number; percent: string };
+  cpu?: { percent: string | null; temperature: number | null };
   disk: { total: number; used: number; avail: number; percent: string } | null;
   agents: Record<'claude' | 'gemini' | 'codex', { mem: number; count: number; locations: string[] }> | null;
   os: { platform: string; uptime: number; loadavg: number[] };
@@ -580,6 +581,16 @@ function App() {
               </div>
               <p>{serverInfo.memory.percent}% 使用中 ({formatMem(serverInfo.memory.used)} / {formatMem(serverInfo.memory.total)})</p>
               <p>空き: {formatMem(serverInfo.memory.free)}</p>
+            </div>
+            <div className="info-card">
+              <h4>CPU</h4>
+              {serverInfo.cpu?.percent != null ? <>
+              <div className="bar-container">
+                <div className="bar" style={{ width: `${serverInfo.cpu.percent}%`, background: barColor(parseFloat(serverInfo.cpu.percent)) }} />
+              </div>
+              <p>{serverInfo.cpu.percent}% 使用中</p>
+              </> : <p role="status">CPU使用率を計測中です。</p>}
+              <p>温度: {serverInfo.cpu?.temperature != null ? `${serverInfo.cpu.temperature.toFixed(1)}°C` : '取得できません'}</p>
             </div>
             <div className="info-card">
               <h4>ディスク使用量</h4>
