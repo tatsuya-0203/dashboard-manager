@@ -424,6 +424,42 @@ const getAgentProcesses = () => {
     return type ? [{ pid: Number(pid), mem: Number(rss) * 1024, type }] : [];
   });
 };
+// CPU 使用率（全コア合計）を1秒ごとの差分で取る。最初のサンプルが取れるまでは null。
+const cpuTimes = () => os.cpus().reduce((s, { times }) => {
+  s.idle += times.idle;
+  s.total += Object.values(times).reduce((a, b) => a + b, 0);
+  return s;
+}, { idle: 0, total: 0 });
+let cpuPrev = cpuTimes();
+let cpuPercent = null;
+setInterval(() => {
+  const next = cpuTimes();
+  const total = next.total - cpuPrev.total;
+  if (total > 0) cpuPercent = Math.max(0, Math.min(100, (1 - (next.idle - cpuPrev.idle) / total) * 100));
+  cpuPrev = next;
+}, 1000).unref();
+
+// CPU 温度（°C）。hwmon の CPU センサーだけを見る。Package id / Tdie / Tctl を優先し、無ければ最大値。読めなければ null。
+const CPU_SENSORS = ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal'];
+const readTrim = file => { try { return fs.readFileSync(file, 'utf8').trim(); } catch { return ''; } };
+const getCpuTemperature = (root = '/sys/class/hwmon') => {
+  let devices;
+  try { devices = fs.readdirSync(root); } catch { return null; }
+  for (const device of devices) {
+    const dir = path.join(root, device);
+    if (!CPU_SENSORS.includes(readTrim(path.join(dir, 'name')))) continue;
+    let files;
+    try { files = fs.readdirSync(dir); } catch { continue; }
+    const values = files.filter(file => /^temp\d+_input$/.test(file)).map(file => ({
+      label: readTrim(path.join(dir, file.replace('_input', '_label'))), raw: readTrim(path.join(dir, file)),
+    })).filter(v => /^-?\d+$/.test(v.raw) && Number(v.raw) > -40000 && Number(v.raw) < 150000).map(v => ({ label: v.label, value: Number(v.raw) / 1000 }));
+    if (!values.length) continue;
+    const preferred = values.find(v => /^(Package id|Tdie)/.test(v.label)) || values.find(v => v.label === 'Tctl');
+    return preferred ? preferred.value : Math.max(...values.map(v => v.value));
+  }
+  return null;
+};
+
 const getExtendedSystemInfo = () => {
   const interfaces = os.networkInterfaces();
   const localIps = [];
@@ -455,6 +491,7 @@ const getExtendedSystemInfo = () => {
   return {
     network: { localIps, globalIp: getGlobalIp() },
     memory: { total: totalMem, free: freeMem, used: usedMem, percent: ((usedMem / totalMem) * 100).toFixed(1) },
+    cpu: { percent: cpuPercent === null ? null : cpuPercent.toFixed(1), temperature: getCpuTemperature() },
     disk,
     agents,
     os: { platform: os.platform(), uptime: os.uptime(), loadavg: os.loadavg() },

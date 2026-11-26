@@ -58,6 +58,21 @@ test('filters and sorts apps, shows empty states, and persists the chosen theme'
   expect(screen.getByText('稼働中のコンテナはありません。')).toBeInTheDocument();
 });
 
+test('shows CPU usage and temperature, and falls back when the server has no CPU data yet', async () => {
+  const original = global.fetch as jest.Mock;
+  const withCpu = (cpu: unknown) => jest.fn((input, options) => String(input) === '/api/info'
+    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ ...system, cpu }) } as Response) : original(input, options));
+  global.fetch = withCpu({ percent: '12.5', temperature: 43 });
+  const { unmount } = render(<App />);
+  expect(await screen.findByText('12.5% 使用中')).toBeInTheDocument();
+  expect(screen.getByText('温度: 43.0°C')).toBeInTheDocument();
+  unmount();
+  global.fetch = withCpu({ percent: null, temperature: null });
+  render(<App />);
+  expect(await screen.findByText('CPU使用率を計測中です。')).toBeInTheDocument();
+  expect(screen.getByText('温度: 取得できません')).toBeInTheDocument();
+});
+
 test('requires confirmation, surfaces HTTP errors and closes the log stream with the dialog', async () => {
   render(<App />);
   fireEvent.click(await screen.findByRole('button', { name: 'alpha の詳細とログ' }));

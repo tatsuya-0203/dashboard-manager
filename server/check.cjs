@@ -29,7 +29,13 @@ const mockFs = {
   lstatSync: () => ({ isSymbolicLink: () => false }),
   statSync(file) { if (!files.has(file)) throw missing(); return { isFile: () => true }; },
   statfsSync: () => ({ blocks: 100, bfree: 40, bavail: 30, bsize: 1024 }),
-  readdirSync: () => [], readlinkSync: () => '/home/test/demo',
+  // Only the fake hwmon tree (/hw...) is listed from `files`; every other directory stays empty as before.
+  readdirSync(dir) {
+    if (!String(dir).startsWith('/hw')) return [];
+    const names = new Set([...files.keys()].filter(f => f.startsWith(dir + '/')).map(f => f.slice(dir.length + 1).split('/')[0]));
+    if (!names.size) throw missing();
+    return [...names];
+  }, readlinkSync: () => '/home/test/demo',
 };
 class PM2 {
   constructor() { connections.push(this); }
@@ -260,5 +266,12 @@ const key = () => evaluate('generateKillToken()');
   assert.equal(ssh.accepted24h[0].user, 'me');
   const ufw = JSON.parse(evaluate(`JSON.stringify(summarizeUFW("[UFW BLOCK] SRC=8.8.8.8 DST=x PROTO=TCP SPT=1 DPT=443\\n[UFW BLOCK] SRC=192.168.1.2 PROTO=UDP DPT=21027\\n[UFW BLOCK] SRC=fe80::1 PROTO=UDP DPT=21027"))`));
   assert.deepEqual(ufw, { blocked24h: 1, topPorts: [{ port: '443/TCP', count: 1 }], topSources: [{ ip: '8.8.8.8', count: 1 }] });
-  console.log('All server / SW checks passed: auth, CSRF, routes, PM2, SSE, atomic storage, token kill flow, SSH replay and attack summary. External effects are stubbed.');
+  // CPU temperature: non-CPU sensors are skipped, "Package id" wins over hotter cores, out-of-range values are ignored.
+  for (const [file, value] of Object.entries({ 'hwmon0/name': 'acpitz\n', 'hwmon0/temp1_input': '99000', 'hwmon1/name': 'coretemp\n',
+    'hwmon1/temp1_input': '43000', 'hwmon1/temp1_label': 'Package id 0', 'hwmon1/temp2_input': '61000', 'hwmon1/temp3_input': '-273000' })) files.set(`/hw/${file}`, value);
+  assert.equal(evaluate('getCpuTemperature("/hw")'), 43);
+  files.delete('/hw/hwmon1/temp1_label');
+  assert.equal(evaluate('getCpuTemperature("/hw")'), 61);
+  assert.equal(evaluate('getCpuTemperature("/no-such-dir")'), null);
+  console.log('All server / SW checks passed: auth, CSRF, routes, PM2, SSE, atomic storage, token kill flow, SSH replay, attack summary and CPU temperature. External effects are stubbed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
